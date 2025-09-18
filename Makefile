@@ -152,6 +152,7 @@ UPROGS=\
 	$U/_sleep\
 	$U/_pingpong\
 	$U/_primes\
+	$U/_test_1.6_pingpong\
 
 
 ifeq ($(LAB),syscall)
