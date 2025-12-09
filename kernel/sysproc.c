@@ -6,6 +6,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
 
 uint64
 sys_exit(void)
@@ -108,6 +109,26 @@ sys_trace(void)
 
     // 将 mask 保存到当前进程的一个字段中（我们待会要加）
     myproc()->tracemask = mask;
+
+    return 0;
+}
+
+uint64
+sys_sysinfo(void)
+{
+    uint64 addr;
+    struct sysinfo info;
+
+    // 读参数：用户传入的指针地址
+    if (argaddr(0, &addr) < 0)
+        return -1;
+
+    info.freemem = get_freemem();
+    info.nproc = get_nproc();
+
+    // 将结构体复制到用户空间
+    if (copyout(myproc()->pagetable, addr, (char *)&info, sizeof(info)) < 0)
+        return -1;
 
     return 0;
 }
