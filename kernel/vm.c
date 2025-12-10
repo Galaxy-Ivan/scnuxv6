@@ -56,6 +56,13 @@ kvminithart()
   sfence_vma();
 }
 
+// Store kernel page table to SATP register
+void proc_inithart(pagetable_t kpt)
+{
+  w_satp(MAKE_SATP(kpt));
+  sfence_vma();
+}
+
 // Return the address of the PTE in page table pagetable
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page-table pages.
@@ -121,6 +128,8 @@ kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
     panic("kvmmap");
 }
 
+#include "spinlock.h"
+#include "proc.h"
 // translate a kernel virtual address to
 // a physical address. only needed for
 // addresses on the stack.
@@ -132,7 +141,8 @@ kvmpa(uint64 va)
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  // pte = walk(kernel_pagetable, va, 0);
+  pte = walk(myproc()->kernelpt, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -315,6 +325,62 @@ vmprint(pagetable_t pagetable, int deep)
   }
 }
 
+// 辅助函数，为进程创建内核页表并映射必要的内核地址空间
+void uvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if (mappages(pagetable, va, sz, pa, perm) != 0)
+    panic("uvmmap");
+}
+
+// Create a kernel page table for the process
+pagetable_t
+proc_kpt_init()
+{
+  pagetable_t kernelpt = uvmcreate(); // 分配一个空页表
+  if (kernelpt == 0)
+    return 0;
+  // MMIO 寄存器，UART0 作为虚拟地址和物理地址参数，长度为一页，权限为可读写，串口硬件寄存器，不需要可执行
+  uvmmap(kernelpt, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  // 为 virtio 磁盘控制器 MMIO 寄存器创建映射，长度为一页，权限为可读写
+  uvmmap(kernelpt, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  // 为 CLINT 创建映射，长度为 0x10000 字节，权限为可读写
+  uvmmap(kernelpt, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  // 为 PLIC 创建映射，长度为 0x400000 字节，权限为可读写
+  uvmmap(kernelpt, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+  // 映射内核代码段为只读可执行
+  uvmmap(kernelpt, KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);
+  // 映射内核数据段和物理内存为可读写
+  uvmmap(kernelpt, (uint64)etext, (uint64)etext, PHYSTOP - (uint64)etext, PTE_R | PTE_W);
+  // 映射 trampoline 代码为只读可执行
+  uvmmap(kernelpt, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+  return kernelpt;
+}
+
+void copyUserkvm(pagetable_t userpt, pagetable_t kernelpt, uint64 start, uint64 sz)
+{
+  for (uint64 i = start; i < start + sz; i += PGSIZE)
+  {
+    // 在用户页表中查找虚拟地址 i 对应的 PTE，且不分配新的页表
+    pte_t *pte = walk(userpt, i, 0);
+    if (pte == 0)
+      panic("copyUserkvm: pte should exist");
+
+    // 若 PTE 不存在或无效，抛出 panic
+    if ((*pte & PTE_V) == 0)
+      panic("copyUserkvm: page not present");
+
+    // 从PTE中提取物理地址。
+    uint64 pa = PTE2PA(*pte);
+
+    // 清除用户可访问位，内核映射不应有 PTE_U 位。
+    uint flags = PTE_FLAGS(*pte) & (~PTE_U);
+
+    // 在内核页表中为相同的物理地址创建映射
+    if (mappages(kernelpt, i, PGSIZE, pa, flags) != 0)
+      panic("copyUserkvm: mappages");
+  }
+}
+
 // Free user memory pages,
 // then free page-table pages.
 void
@@ -405,23 +471,25 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
+  // uint64 n, va0, pa0;
 
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
+  // while(len > 0){
+  //   va0 = PGROUNDDOWN(srcva);
+  //   pa0 = walkaddr(pagetable, va0);
+  //   if(pa0 == 0)
+  //     return -1;
+  //   n = PGSIZE - (srcva - va0);
+  //   if(n > len)
+  //     n = len;
+  //   memmove(dst, (void *)(pa0 + (srcva - va0)), n);
 
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  //   len -= n;
+  //   dst += n;
+  //   srcva = va0 + PGSIZE;
+  // }
+  // return 0;
+
+  return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -431,38 +499,39 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  int got_null = 0;
+  // uint64 n, va0, pa0;
+  // int got_null = 0;
 
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
+  // while(got_null == 0 && max > 0){
+  //   va0 = PGROUNDDOWN(srcva);
+  //   pa0 = walkaddr(pagetable, va0);
+  //   if(pa0 == 0)
+  //     return -1;
+  //   n = PGSIZE - (srcva - va0);
+  //   if(n > max)
+  //     n = max;
 
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
+  //   char *p = (char *) (pa0 + (srcva - va0));
+  //   while(n > 0){
+  //     if(*p == '\0'){
+  //       *dst = '\0';
+  //       got_null = 1;
+  //       break;
+  //     } else {
+  //       *dst = *p;
+  //     }
+  //     --n;
+  //     --max;
+  //     p++;
+  //     dst++;
+  //   }
 
-    srcva = va0 + PGSIZE;
-  }
-  if(got_null){
-    return 0;
-  } else {
-    return -1;
-  }
+  //   srcva = va0 + PGSIZE;
+  // }
+  // if(got_null){
+  //   return 0;
+  // } else {
+  //   return -1;
+  // }
+  return copyinstr_new(pagetable, dst, srcva, max);
 }

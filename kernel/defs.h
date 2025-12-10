@@ -108,9 +108,10 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+void            proc_freekernelpt(pagetable_t kernelpt);
 
 // swtch.S
-void            swtch(struct context*, struct context*);
+void swtch(struct context *, struct context *);
 
 // spinlock.c
 void            acquire(struct spinlock*);
@@ -178,7 +179,12 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
+int             copyin_new(pagetable_t, char *, uint64, uint64);
+int             copyinstr_new(pagetable_t, char *, uint64, uint64);
 void            vmprint(pagetable_t pagetable, int);
+pagetable_t     proc_kpt_init();
+void            proc_inithart(pagetable_t kpt);
+void            copyUserkvm(pagetable_t userpt, pagetable_t kernelpt, uint64 start, uint64 sz);
 
 // plic.c
 void            plicinit(void);
