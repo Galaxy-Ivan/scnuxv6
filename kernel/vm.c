@@ -279,7 +279,7 @@ freewalk(pagetable_t pagetable)
     pte_t pte = pagetable[i];
     if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
       // this PTE points to a lower-level page table.
-      uint64 child = PTE2PA(pte);
+      uint64 child = PTE2PA(pte); // 与构造 pte 相反，向右位移 10 位丢弃标志位，再左移 12 位得到物理地址
       freewalk((pagetable_t)child);
       pagetable[i] = 0;
     } else if(pte & PTE_V){
@@ -287,6 +287,32 @@ freewalk(pagetable_t pagetable)
     }
   }
   kfree((void*)pagetable);
+}
+
+void
+vmprint(pagetable_t pagetable, int deep)
+{
+  if (deep == 1) {
+    printf("page table %p\n", pagetable);
+  }
+  for (int i = 0; i < 512; ++i) {
+    pte_t pte = pagetable[i];
+    if (pte & PTE_V) {
+      for (int j = 0; j < deep; ++j) {
+        printf("..");
+        if (j == deep - 1) {
+          printf("%d: ", i);
+        } else {
+          printf(" ");
+        }
+      }
+      printf("pte %p pa %p\n", pte, PTE2PA(pte));
+      if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+        uint64 child = PTE2PA(pte);
+        vmprint((pagetable_t)child, deep + 1);
+      }
+    }
+  }
 }
 
 // Free user memory pages,
