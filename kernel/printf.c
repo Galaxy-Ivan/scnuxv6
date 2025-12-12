@@ -132,3 +132,32 @@ printfinit(void)
   initlock(&pr.lock, "pr");
   pr.locking = 1;
 }
+
+void backtrace(void)
+{
+  uint64 fp = r_fp();
+  struct proc *p = myproc();
+  
+  if (p == 0) {
+    printf("backtrace: no current process\n");
+    return;
+  }
+
+  printf("backtrace:\n");
+  while (p->kstack <= fp && fp < (p->kstack + PGSIZE)) {
+    uint64 ra = *((uint64 *)fp - 1);
+    printf("%p\n", ra);
+    uint64 tofp = *((uint64 *)(fp - 16));
+
+    if (tofp == 0)
+      break;
+    
+    if (tofp <= (uint64)fp) {
+      printf("backtrace: frame pointer loop\n");
+      break;
+    }
+
+    fp = tofp;
+  }
+  
+}
