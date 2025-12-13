@@ -145,9 +145,9 @@ void backtrace(void)
 
   printf("backtrace:\n");
   while (p->kstack <= fp && fp < (p->kstack + PGSIZE)) {
-    uint64 ra = *((uint64 *)fp - 1);
-    printf("%p\n", ra);
-    uint64 tofp = *((uint64 *)(fp - 16));
+    uint64 ra = *((uint64 *)fp - 1); // 这里在转为指针之后再 - 1，这个减 1 表示 uint64* 下向前位移一个变量的距离
+    printf("%p\n", ra); // 打印返回地址
+    uint64 tofp = *((uint64 *)(fp - 16)); // 这里 -16 是因为 fp 指向的是栈帧的顶部，而栈帧布局中，保存的上一个栈帧指针位于当前栈帧顶部往下偏移 16 字节的位置
 
     if (tofp == 0)
       break;

@@ -77,9 +77,20 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+  if(which_dev == 2) {
+    struct proc *p = myproc();
+    if (p && p->alarm_interval > 0) {
+      p->alarm_ticks++;
+      if (p->alarm_ticks >= p->alarm_interval && p->alarm_active == 0) {
+        p->alarm_ticks = 0; // 清空计数器
+        p->alarm_active = 1; // 标记为清除
 
+        p->alarm_tf = *p->trapframe; // 记录完整的用户寄存器
+        p->trapframe->epc = p->alarm_handler; // 修改 epc，使它指向用户 handler
+      }
+    }
+    yield();
+  }
   usertrapret();
 }
 
