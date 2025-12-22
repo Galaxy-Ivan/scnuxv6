@@ -38,6 +38,7 @@ usertrap(void)
 {
   int which_dev = 0;
 
+  // 正如笔者所说，xv6 对异常的处理相当‘无趣’，只要内核发生了 re，那就直接报 panic
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
@@ -46,10 +47,11 @@ usertrap(void)
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
-  
-  // save user program counter.
+
+  // save user program counter. 保存用户程序的断点
   p->trapframe->epc = r_sepc();
   
+  // scause == 8，是主动抛出的异常，目的是执行系统调用
   if(r_scause() == 8){
     // system call
 
@@ -58,16 +60,61 @@ usertrap(void)
 
     // sepc points to the ecall instruction,
     // but we want to return to the next instruction.
-    p->trapframe->epc += 4;
+    p->trapframe->epc += 4; // 完事了之后去执行下一条指令
 
     // an interrupt will change sstatus &c registers,
     // so don't enable until done with those registers.
-    intr_on();
+    intr_on(); // 在保存了寄存器之后，才允许中断
 
-    syscall();
-  } else if((which_dev = devintr()) != 0){
-    // ok
-  } else {
+    syscall(); // 然后交给系统调用去处理
+  }
+  else if(r_scause() == 13 || r_scause() == 15) { // scause() == 13 || 15, 是页面错误
+    // printf("scause=%d stval=%p\n", r_scause(), r_stval());
+    // uint64 upsz = PGROUNDUP(r_stval());
+    uint64 downsz = PGROUNDDOWN(r_stval());
+    if (r_stval() >= p->sz) { // 如果确实是越界了
+      // printf("dbg1 %p %p\n", newsz, myproc()->sz);
+      // printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      // printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+      goto end;
+    } // else if (r_stval() < PGROUNDDOWN(p->trapframe->sp)) {
+    //   p->killed = 1;
+    //   goto end;
+    // }
+    // duel with [remap]
+    pte_t *pte = walk(p->pagetable, downsz, 0);
+    if (pte != 0 && (*pte & PTE_V)) {
+      // printf("dbgA\n");
+      // 如果已经有有效映射了，说明这不是缺页问题，而是权限问题（如向只读页写入）
+      p->killed = 1;
+      goto end;
+    }
+
+    // 哪里亮了点哪里，我不需要关心 oldsz 是多少，我只需要为当前位置申请内存
+    char *mem = kalloc();
+    if (mem == 0) { // 没申请到
+      // printf("dbg2\n");
+      // printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      // printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+      goto end;
+    }
+    if (mappages(p->pagetable, downsz, PGSIZE, (uint64)mem,
+                PTE_W | PTE_X | PTE_R | PTE_U) != 0) {
+      kfree(mem);
+      printf("dbg3\n");
+      // printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      // printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+      goto end;
+    }
+    memset(mem, 0, PGSIZE); // 申请成功，将这一段内存清空，避免读取到之前程序留下的敏感信息
+end:;
+  }
+  else if((which_dev = devintr()) != 0){ // 顺便获取 which_dev
+    // ok 如果是从外面进来的，设备中断，CPU 中断啥的，那就是别人已经处理好的了，那就不管它
+  } else { // 不然就是 RE 了
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -76,11 +123,11 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
-  // give up the CPU if this is a timer interrupt.
+  // give up the CPU if this is a timer interrupt. 时钟中断
   if(which_dev == 2)
     yield();
 
-  usertrapret();
+  usertrapret(); // 将保存的寄存器恢复，退出中断处理
 }
 
 //

@@ -41,14 +41,23 @@ sys_wait(void)
 uint64
 sys_sbrk(void)
 {
-  int addr;
   int n;
+  uint64 addr;
+  struct proc *p = myproc();
 
-  if(argint(0, &n) < 0)
+  if (argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
-  if(growproc(n) < 0)
-    return -1;
+  addr = p->sz;
+  if (n > 0)
+  {
+    p->sz += n; // 懒分配：只管长大
+  }
+  else
+  {
+    // 缩减内存：必须实际执行，否则会出问题
+    if (growproc(n) < 0)
+      return -1;
+  }
   return addr;
 }
 
