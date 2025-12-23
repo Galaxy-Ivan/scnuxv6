@@ -6,6 +6,11 @@
 #include "proc.h"
 #include "defs.h"
 
+extern struct
+{
+  struct spinlock lock; // 添加一个锁，避免多 CPU 产生的错误
+  int count[PHYSTOP / PGSIZE];
+} ref;
 struct spinlock tickslock;
 uint ticks;
 
@@ -27,6 +32,46 @@ void
 trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
+}
+
+char*
+cow_handler(pagetable_t pagetable, uint64 va) {
+  pte_t *pte;
+  uint64 downsz = PGROUNDDOWN(va);
+  if (va >= MAXVA)
+    return 0;
+  pte = walk(pagetable, downsz, 0);
+  if (pte == 0) //  添加完整的判断，确保能完整接管 vm.c:copyout 的 walkaddr 功能
+    return 0;
+  if (*pte & PTE_W)
+    return (char*)PTE2PA(*pte);
+  if ((*pte & PTE_COW) == 0)
+    return 0;
+  if ((*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+    return 0;
+  uint64 pa = PTE2PA(*pte);
+  int refid = (uint64)pa / PGSIZE; // ensured (pa % PGSIZE == 0)
+  int refc;
+  acquire(&ref.lock);
+  refc = ref.count[refid];
+  release(&ref.lock);
+  if (refc > 1) {
+    char *mem;
+    if ((mem = kalloc()) == 0)
+      return 0;
+    memmove(mem, (char *)pa, PGSIZE);
+    pte_t newPte = *pte;
+    newPte = PA2PTE(mem) | PTE_FLAGS(*pte);
+    newPte &= ~PTE_COW;
+    newPte |= PTE_W;
+    *pte = newPte; // 原子操作
+    kfree((char*)pa); // 在拷贝完数据后，再做 kfree
+  }
+  else if (refc == 1) { // Last need of this page
+    *pte &= ~PTE_COW;
+    *pte |= PTE_W;
+  }
+  return (char*)PTE2PA(*pte);
 }
 
 //
@@ -65,9 +110,14 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  } else if (r_scause() == 15) {
+    // write scause
+    if (cow_handler(myproc()->pagetable, r_stval()) == 0)
+      goto end;
+  }else if((which_dev = devintr()) != 0){
     // ok
   } else {
+   end:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;

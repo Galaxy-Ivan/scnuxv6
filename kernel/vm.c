@@ -5,7 +5,11 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
-
+#include "spinlock.h" // ref need
+extern struct {
+  struct spinlock lock; // 添加一个锁，避免多 CPU 产生的错误
+  int count[PHYSTOP / PGSIZE];
+} ref;
 /*
  * the kernel's page table.
  */
@@ -311,7 +315,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  // char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -319,12 +323,22 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+    // cow
+    *pte &= ~PTE_W;
+    *pte |= PTE_COW;
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    acquire(&ref.lock);
+    if (pa % PGSIZE)
+      panic("nvmcopy");
+    int refid = (uint64)pa / PGSIZE; // ensured (pa % PGSIZE == 0)
+    ref.count[refid]++;
+    release(&ref.lock);
+    //if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
+      kfree((char*)pa);
       goto err;
     }
   }
@@ -358,7 +372,8 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
+    // pa0 = walkaddr(pagetable, va0);
+    pa0 = (uint64)cow_handler(pagetable, va0);
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
