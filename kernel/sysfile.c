@@ -309,6 +309,36 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+    if (ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)) {
+      int depth = 0;
+      // 循环解析符号链接，设定阈值防止死循环 (如 10)
+      while (ip->type == T_SYMLINK)
+      {
+        if (depth >= 10)
+        {
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+
+        // 读取链接中存储的目标路径
+        if (readi(ip, 0, (uint64)path, 0, MAXPATH) < 0) {
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+
+        iunlockput(ip); // 释放当前的符号链接 inode
+
+        // 查找目标路径
+        if ((ip = namei(path)) == 0) {
+          end_op();
+          return -1;
+        }
+        ilock(ip); // 锁定新找到的 inode
+        depth++;
+      }
+    }
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
@@ -482,5 +512,36 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+
+  // 获取参数
+  if (argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+
+  // 在 path 处创建一个新 inode，类型为 T_SYMLINK
+  if ((ip = create(path, T_SYMLINK, 0, 0)) == 0) {
+    end_op();
+    return -1;
+  }
+
+  // 将 target 路径字符串写入 inode 的数据块
+  // 注意：writei 返回写入的字节数，target 需要包含结束符吗？通常是的。
+  if (writei(ip, 0, (uint64)target, 0, strlen(target) + 1) != strlen(target) + 1) {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
   return 0;
 }
