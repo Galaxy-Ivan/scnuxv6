@@ -400,6 +400,38 @@ bmap(struct inode *ip, uint bn)
     brelse(bp);
     return addr;
   }
+  bn -= NINDIRECT;
+
+  if(bn < NINDIRECT * NINDIRECT){
+    // 加载二级间接块索引表 (addrs[NDIRECT+1])
+    if((addr = ip->addrs[NDIRECT+1]) == 0)
+      ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+    
+    // 读取二级块
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    
+    // 计算在一级表中的位置
+    // bn / NINDIRECT 是指它是第几个“一级块”
+    uint index_lvl2 = bn / NINDIRECT; 
+    uint index_lvl1 = bn % NINDIRECT;
+
+    if((addr = a[index_lvl2]) == 0){
+      a[index_lvl2] = addr = balloc(ip->dev);
+      log_write(bp); // 修改了二级块的内容，需要记日志
+    }
+    brelse(bp); // 释放二级块的锁
+
+    // 读取一级块
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[index_lvl1]) == 0){
+      a[index_lvl1] = addr = balloc(ip->dev);
+      log_write(bp); // 修改了一级块的内容
+    }
+    brelse(bp);
+    return addr;
+  }
 
   panic("bmap: out of range");
 }
@@ -410,8 +442,8 @@ void
 itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp;
-  uint *a;
+  struct buf *bp, *bp2; // bp2 用于二级块中的一级块
+  uint *a, *a2;
 
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
@@ -430,6 +462,30 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  if (ip->addrs[NDIRECT + 1])
+  {
+    bp = bread(ip->dev, ip->addrs[NDIRECT + 1]); // 读取二级块
+    a = (uint *)bp->data;
+    for (i = 0; i < NINDIRECT; i++)
+    {
+      if (a[i])
+      { // 如果这个二级条目指向了一个一级块
+        bp2 = bread(ip->dev, a[i]);
+        a2 = (uint *)bp2->data;
+        for (j = 0; j < NINDIRECT; j++)
+        {
+          if (a2[j])
+            bfree(ip->dev, a2[j]); // 释放数据块
+        }
+        brelse(bp2);
+        bfree(ip->dev, a[i]); // 释放一级块
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT + 1]); // 释放二级块本身
+    ip->addrs[NDIRECT + 1] = 0;
   }
 
   ip->size = 0;
