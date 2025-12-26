@@ -484,3 +484,132 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void) {
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  struct file *f;
+  struct proc *p = myproc();
+
+  // 获取参数
+  // void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+  if (argaddr(0, &addr) < 0 || argint(1, &length) < 0 || argint(2, &prot) < 0 ||
+      argint(3, &flags) < 0 || argfd(4, &fd, &f) < 0 || argint(5, &offset) < 0)
+    return -1;
+
+  // xv6 实验简化假设：addr 始终为 0，offset 始终为 0
+  // 必须是 MAP_SHARED 或 MAP_PRIVATE
+  if ((flags & MAP_SHARED) == 0 && (flags & MAP_PRIVATE) == 0)
+    return -1;
+
+  // 只有可写且映射为共享的文件，才需要写权限打开
+  if ((flags & MAP_SHARED) && (prot & PROT_WRITE) && !f->writable)
+    return -1;
+
+  length = PGROUNDUP(length);
+
+  // 1. 寻找空闲的 VMA 槽位
+  struct vma *v = 0;
+  for (int i = 0; i < 16; i++) {
+    if (p->vmas[i].valid == 0) {
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if (v == 0)
+    return -1; // 没有空闲槽位
+
+  // 2. 确定虚拟地址 (简单策略：使用 p->sz 并增长)
+  // 注意：真实 OS 会在堆和栈之间寻找空洞，这里为了通过实验，直接利用堆增长
+  v->valid = 1;
+  v->addr = p->sz;
+  v->length = length;
+  v->prot = prot;
+  v->flags = flags;
+  v->f = f;
+  v->offset = offset;
+
+  // 3. 增加文件引用计数，防止文件被关闭
+  filedup(f);
+
+  // 4. 更新进程大小
+  p->sz += length;
+
+  return v->addr;
+}
+
+// 辅助函数：处理具体的 unmap 逻辑
+// 这里需要处理脏页写回
+int do_munmap(struct proc *p, struct vma *v, uint64 addr, int length) {
+  uint64 start = addr;
+  int count = length; // 字节数
+
+  // 遍历范围内的每一页
+  for (uint64 cur = start; cur < start + count; cur += PGSIZE) {
+    pte_t *pte = walk(p->pagetable, cur, 0);
+    if (pte && (*pte & PTE_V)) {
+      // 如果是 SHARED 映射且页面被修改过 (PTE_D)，写回文件
+      // 实验提示说可以不检查 PTE_D 直接写回，但为了严谨我们尽量利用
+      // 注意：RISC-V 硬件会自动设置 PTE_D (Dirty bit)
+      if ((v->flags & MAP_SHARED)) {
+        // uint64 pa = PTE2PA(*pte);
+        begin_op();
+        ilock(v->f->ip);
+        // 使用 writei 将物理页内容写回文件
+        // 这里的 cur 是用户空间的虚拟地址，但在 sys_munmap 上下文中，
+        // 我们就在该进程的页表中，所以可以直接传 cur 给 writei (user_src=1)
+        writei(v->f->ip, 1, cur, v->offset + (cur - v->addr), PGSIZE);
+        iunlock(v->f->ip);
+        end_op();
+      }
+      // 从页表中解除映射并释放物理页
+      uvmunmap(p->pagetable, cur, 1, 1);
+    }
+  }
+  return 0;
+}
+
+uint64
+sys_munmap(void) {
+  uint64 addr;
+  int length;
+  struct proc *p = myproc();
+
+  if (argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+
+  struct vma *v = 0;
+  for (int i = 0; i < 16; i++) {
+    if (p->vmas[i].valid && addr >= p->vmas[i].addr && addr < p->vmas[i].addr + p->vmas[i].length)
+    {
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if (v == 0)
+    return -1;
+
+  // 1. 执行写回和解除映射
+  do_munmap(p, v, addr, length);
+
+  // 2. 更新 VMA 结构
+  // 情况 A: Unmap 整个区域
+  if (addr == v->addr && length == v->length) {
+    fileclose(v->f); // 减少引用计数
+    v->valid = 0;
+  }
+  // 情况 B: Unmap 开头
+  else if (addr == v->addr) {
+    v->addr += length;
+    v->length -= length;
+    v->offset += length;
+  }
+  // 情况 C: Unmap 结尾
+  else if (addr + length == v->addr + v->length) {
+    v->length -= length;
+  }
+  // 忽略中间打洞的情况 (Lab 没要求)
+
+  return 0;
+}

@@ -6,6 +6,11 @@
 #include "proc.h"
 #include "defs.h"
 
+#include "sleeplock.h" // file.h 需要用到 sleeplock
+#include "fs.h"        // 为了使用 struct inode 等
+#include "file.h"      // 为了使用 struct file (解决 v->f->ip 报错)
+#include "fcntl.h"     // 为了使用 PROT_READ, PROT_WRITE
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -302,6 +307,15 @@ fork(void)
 
   np->state = RUNNABLE;
 
+  // 复制 VMA
+  for (int i = 0; i < 16; i++) {
+    struct vma *v = &p->vmas[i];
+    if (v->valid) {
+      np->vmas[i] = *v; // 结构体拷贝
+      filedup(v->f);    // 增加文件引用
+    }
+  }
+
   release(&np->lock);
 
   return pid;
@@ -350,6 +364,36 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  // 清理 VMA
+  for (int i = 0; i < 16; i++) {
+    struct vma *v = &p->vmas[i];
+    if (v->valid) {
+      // 逻辑等同于 unmap 整个区域
+      // 注意：exit 时页表还在，可以直接调用我们封装的逻辑
+      // 这里如果图省事，可以直接 fileclose 并解除 valid，
+      // 但题目要求 "Modify exit to unmap ... as if munmap had been called"
+      // 这意味着如果有 MAP_SHARED 且 dirty 的页面，必须写回！
+
+      // 复用之前 sys_munmap 里的核心逻辑，或者重新实现简化版：
+      // 1. 遍历页面，如果有 dirty & shared，写回
+      for (uint64 addr = v->addr; addr < v->addr + v->length; addr += PGSIZE) {
+        pte_t *pte = walk(p->pagetable, addr, 0);
+        if (pte && (*pte & PTE_V) && (*pte & PTE_D) && (v->flags & MAP_SHARED)) {
+          // uint64 pa = PTE2PA(*pte);
+          begin_op();
+          ilock(v->f->ip);
+          writei(v->f->ip, 1, addr, v->offset + (addr - v->addr), PGSIZE);
+          iunlock(v->f->ip);
+          end_op();
+        }
+        // 这里不需要调用 uvmunmap，因为 exit 结尾会调用 proc_freepagetable 统一释放所有内存
+      }
+
+      fileclose(v->f);
+      v->valid = 0;
     }
   }
 

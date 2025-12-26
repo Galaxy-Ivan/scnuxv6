@@ -6,6 +6,11 @@
 #include "proc.h"
 #include "defs.h"
 
+#include "sleeplock.h" // file.h 中的 inode 需要 sleeplock
+#include "fs.h"        // file.h 中的 inode 需要 fs.h 的定义
+#include "file.h"      // 这里定义了 struct file
+#include "fcntl.h"     // 这里定义了 PROT_READ 等宏
+
 struct spinlock tickslock;
 uint ticks;
 
@@ -65,9 +70,53 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  } else if ((r_scause() == 13 || r_scause() == 15)) {
+      uint64 va = r_stval(); // 出错的虚拟地址
+      struct proc *p = myproc();
+      struct vma *v = 0;
+      
+      // 1. 检查 VA 是否在某个 VMA 范围内
+      for (int i = 0; i < 16; i++) {
+        if (p->vmas[i].valid && va >= p->vmas[i].addr && va < p->vmas[i].addr + p->vmas[i].length) {
+          v = &p->vmas[i];
+          break;
+        }
+      }
+
+      if (v) {
+        // 2. 分配物理内存
+        char *mem = kalloc();
+        if (mem == 0) {
+          p->killed = 1;
+        } else {
+          memset(mem, 0, PGSIZE);
+          
+          // 3. 从文件读取数据到物理页
+          // 计算文件中的偏移量
+          uint64 offset = v->offset + (PGROUNDDOWN(va) - v->addr);
+          ilock(v->f->ip);
+          readi(v->f->ip, 0, (uint64)mem, offset, PGSIZE);
+          iunlock(v->f->ip);
+
+          // 4. 设置权限
+          int perm = PTE_U;
+          if (v->prot & PROT_READ) perm |= PTE_R;
+          if (v->prot & PROT_WRITE) perm |= PTE_W;
+          if (v->prot & PROT_EXEC) perm |= PTE_X;
+
+          // 5. 映射到页表
+          if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, perm) != 0) {
+            kfree(mem);
+            p->killed = 1;
+          }
+        }
+      } else {
+        goto end;
+      }
+    } else if((which_dev = devintr()) != 0){
     // ok
   } else {
+   end:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
